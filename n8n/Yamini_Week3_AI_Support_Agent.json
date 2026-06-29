@@ -1,0 +1,372 @@
+{
+  "name": "Yamini Week3 - CodeBasics AI Support Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "public": true,
+        "options": {
+          "responseMode": "lastNode"
+        }
+      },
+      "id": "node-chat-trigger",
+      "name": "When chat message received",
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.1,
+      "position": [-1040, 320],
+      "webhookId": "yamini-week3-support-agent"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "query",
+              "value": "={{ $json.chatInput }}",
+              "type": "string"
+            },
+            {
+              "id": "a2",
+              "name": "learnerName",
+              "value": "Learner",
+              "type": "string"
+            },
+            {
+              "id": "a3",
+              "name": "learnerEmail",
+              "value": "learner@example.com",
+              "type": "string"
+            },
+            {
+              "id": "a4",
+              "name": "sessionId",
+              "value": "={{ $json.sessionId || $now.toMillis().toString() }}",
+              "type": "string"
+            },
+            {
+              "id": "a5",
+              "name": "timestamp",
+              "value": "={{ $now.toISO() }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherInputFields": false,
+        "options": {}
+      },
+      "id": "node-prepare-input",
+      "name": "Prepare Input",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-820, 320],
+      "notes": "Captures the learner query + metadata to log. Edit learnerName / learnerEmail or wire them from your real intake form/webhook."
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": "Select Yamini_Week3_FAQ_Knowledge_Base.xlsx"
+        },
+        "options": {}
+      },
+      "id": "node-drive-download",
+      "name": "Download FAQ from Drive",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [-600, 320],
+      "notes": "Pick Yamini_Week3_FAQ_Knowledge_Base.xlsx from the list after import. Requires a Google Drive credential."
+    },
+    {
+      "parameters": {
+        "operation": "xlsx",
+        "binaryPropertyName": "data",
+        "options": {}
+      },
+      "id": "node-extract-file",
+      "name": "Parse FAQ Spreadsheet",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [-380, 320]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Turn every FAQ row into a numbered Q/A block for the LLM.\n// Flexible about column names so it works with most spreadsheet layouts.\nconst rows = $input.all().map(i => i.json);\n\nfunction pick(row, keys) {\n  for (const k of Object.keys(row)) {\n    const norm = k.toLowerCase().trim();\n    if (keys.includes(norm)) return row[k];\n  }\n  return undefined;\n}\n\nconst faqText = rows.map((r, idx) => {\n  const cat = pick(r, ['category', 'topic', 'type']);\n  const q = pick(r, ['question', 'query', 'q', 'questions']) ?? Object.values(r)[0];\n  const a = pick(r, ['answer', 'response', 'a', 'answers']) ?? Object.values(r)[1];\n  const catStr = cat ? ` [${cat}]` : '';\n  return `${idx + 1}.${catStr} Q: ${q}\\n   A: ${a}`;\n}).join('\\n');\n\nconst prep = $('Prepare Input').first().json;\n\nreturn [{\n  json: {\n    faqText: faqText || 'No FAQ rows were found in the spreadsheet.',\n    faqRowCount: rows.length,\n    query: prep.query,\n    learnerName: prep.learnerName,\n    learnerEmail: prep.learnerEmail,\n    sessionId: prep.sessionId,\n    timestamp: prep.timestamp\n  }\n}];"
+      },
+      "id": "node-build-context",
+      "name": "Build FAQ Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-160, 320]
+    },
+    {
+      "parameters": {
+        "modelName": "models/gemini-2.0-flash",
+        "options": {
+          "temperature": 0.2
+        }
+      },
+      "id": "node-gemini-model",
+      "name": "Google Gemini Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [40, 540],
+      "notes": "Requires a 'Google Gemini (PaLM) API' credential - get a free API key at https://aistudio.google.com/app/apikey. Any chat model works; swap the provider if you prefer."
+    },
+    {
+      "parameters": {
+        "schemaType": "fromJson",
+        "jsonSchemaExample": "{\n  \"category\": \"course_access\",\n  \"intent\": \"Learner cannot log in to access their purchased course\",\n  \"needs_human\": false,\n  \"confidence\": 0.9,\n  \"answer\": \"Hi! Sorry you're having trouble logging in. Please try the 'Forgot Password' link on the login page to reset your password, and make sure you're using the same email you purchased with. If it still doesn't work, reply here and we'll dig deeper.\"\n}"
+      },
+      "id": "node-output-parser",
+      "name": "FAQ Output Parser",
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.2,
+      "position": [220, 540]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are the AI Support Agent for CodeBasics, an online ed-tech platform that sells self-paced data/AI/coding courses and runs live cohorts.\n\nAnswer the learner's question using ONLY the FAQ knowledge base below. Be friendly, concise and helpful.\n\n=== FAQ KNOWLEDGE BASE ===\n{{ $json.faqText }}\n=== END FAQ ===\n\nLEARNER QUERY:\n\"{{ $json.query }}\"\n\nClassify the query into one of:\ncourse_access, certificate, refund, discount_sale, course_guidance, payment_issue, other.\n\nSet needs_human = true ONLY for genuine edge cases that the FAQ cannot safely resolve:\n- Billing disputes, or \"payment failed but money was deducted / not refunded\"\n- Real technical bugs the FAQ does not cover\n- Partnership / legal / account-specific issues not covered by the FAQ\n- Any query where the FAQ has no confident answer (confidence < 0.5)\n\nFor everything else (login/course access, certificate download, standard refund-policy questions, discounts/sales, course guidance), set needs_human = false and write the answer directly from the FAQ.\n\nIf needs_human is true, still write a short, polite holding message in the 'answer' field telling the learner their request is being escalated to a human.",
+        "hasOutputParser": true
+      },
+      "id": "node-classify",
+      "name": "Classify & Draft Answer",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.5,
+      "position": [80, 320]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.output.needs_human }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "node-if-human",
+      "name": "Needs Human?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [400, 320]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "e1",
+              "name": "status",
+              "value": "Escalated to Human",
+              "type": "string"
+            },
+            {
+              "id": "e2",
+              "name": "response",
+              "value": "=Hi {{ $('Prepare Input').item.json.learnerName }}, thanks for reaching out. This one needs a specialist, so I've escalated it to our human support team. Someone will follow up with you at {{ $('Prepare Input').item.json.learnerEmail }} shortly. Reference: {{ $('Prepare Input').item.json.sessionId }}.",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherInputFields": true,
+        "options": {}
+      },
+      "id": "node-escalate-set",
+      "name": "Escalate to Human",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [640, 180]
+    },
+    {
+      "parameters": {
+        "sendTo": "support@codebasics.io",
+        "subject": "=[Escalation] {{ $('Classify & Draft Answer').item.json.output.category }} - learner support",
+        "emailType": "text",
+        "message": "=A learner query has been escalated by the AI Support Agent.\n\nWhen: {{ $('Prepare Input').item.json.timestamp }}\nLearner: {{ $('Prepare Input').item.json.learnerName }} <{{ $('Prepare Input').item.json.learnerEmail }}>\nSession: {{ $('Prepare Input').item.json.sessionId }}\n\nCategory: {{ $('Classify & Draft Answer').item.json.output.category }}\nIntent: {{ $('Classify & Draft Answer').item.json.output.intent }}\nConfidence: {{ $('Classify & Draft Answer').item.json.output.confidence }}\n\nQuery:\n{{ $('Prepare Input').item.json.query }}\n\nPlease pick this up from the support queue.",
+        "options": {}
+      },
+      "id": "node-gmail",
+      "name": "Notify Support Team",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [860, 180],
+      "notes": "Optional: emails the human support queue. Needs a Gmail credential. Delete this node if you don't want the email step - the sheet row (Status = Escalated) already acts as the human queue.",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "n1",
+              "name": "status",
+              "value": "Auto-Answered",
+              "type": "string"
+            },
+            {
+              "id": "n2",
+              "name": "response",
+              "value": "={{ $json.output.answer }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherInputFields": true,
+        "options": {}
+      },
+      "id": "node-auto-set",
+      "name": "Auto-Answer",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [640, 420]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "url",
+          "value": "YOUR_GOOGLE_SHEET_URL_OR_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gid=0",
+          "cachedResultName": "Sheet1"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Timestamp": "={{ $('Prepare Input').item.json.timestamp }}",
+            "Session ID": "={{ $('Prepare Input').item.json.sessionId }}",
+            "Learner Name": "={{ $('Prepare Input').item.json.learnerName }}",
+            "Learner Email": "={{ $('Prepare Input').item.json.learnerEmail }}",
+            "Query": "={{ $('Prepare Input').item.json.query }}",
+            "Category": "={{ $('Classify & Draft Answer').item.json.output.category }}",
+            "Intent": "={{ $('Classify & Draft Answer').item.json.output.intent }}",
+            "Needs Human": "={{ $('Classify & Draft Answer').item.json.output.needs_human ? 'Yes' : 'No' }}",
+            "Confidence": "={{ $('Classify & Draft Answer').item.json.output.confidence }}",
+            "Status": "={{ $('Classify & Draft Answer').item.json.output.needs_human ? 'Escalated to Human' : 'Auto-Answered' }}",
+            "Response": "={{ $('Classify & Draft Answer').item.json.output.needs_human ? `Hi ${$('Prepare Input').item.json.learnerName}, thanks for reaching out. This one needs a specialist, so I've escalated it to our human support team. Someone will follow up with you at ${$('Prepare Input').item.json.learnerEmail} shortly. Reference: ${$('Prepare Input').item.json.sessionId}.` : $('Classify & Draft Answer').item.json.output.answer }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            { "id": "Timestamp", "displayName": "Timestamp", "type": "string", "required": false, "canBeUsedToMatch": true, "display": true },
+            { "id": "Session ID", "displayName": "Session ID", "type": "string", "required": false, "canBeUsedToMatch": true, "display": true },
+            { "id": "Learner Name", "displayName": "Learner Name", "type": "string", "required": false, "canBeUsedToMatch": true, "display": true },
+            { "id": "Learner Email", "displayName": "Learner Email", "type": "string", "required": false, "canBeUsedToMatch": true, "display": true },
+            { "id": "Query", "displayName": "Query", "type": "string", "required": false, "canBeUsedToMatch": true, "display": true },
+            { "id": "Category", "displayName": "Category", "type": "string", "required": false, "canBeUsedToMatch": true, "display": true },
+            { "id": "Intent", "displayName": "Intent", "type": "string", "required": false, "canBeUsedToMatch": true, "display": true },
+            { "id": "Needs Human", "displayName": "Needs Human", "type": "string", "required": false, "canBeUsedToMatch": true, "display": true },
+            { "id": "Confidence", "displayName": "Confidence", "type": "string", "required": false, "canBeUsedToMatch": true, "display": true },
+            { "id": "Status", "displayName": "Status", "type": "string", "required": false, "canBeUsedToMatch": true, "display": true },
+            { "id": "Response", "displayName": "Response", "type": "string", "required": false, "canBeUsedToMatch": true, "display": true }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-sheets-log",
+      "name": "Log to Yamini_week3_Responses",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1080, 320],
+      "notes": "Set documentId to your Yamini_week3_Responses sheet (paste URL or pick from list). Add a header row with: Timestamp | Session ID | Learner Name | Learner Email | Query | Category | Intent | Needs Human | Confidence | Status | Response. Requires a Google Sheets credential."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "f1",
+              "name": "output",
+              "value": "={{ $('Classify & Draft Answer').item.json.output.needs_human ? `Hi ${$('Prepare Input').item.json.learnerName}, thanks for reaching out. This one needs a specialist, so I've escalated it to our human support team. Someone will follow up with you at ${$('Prepare Input').item.json.learnerEmail} shortly. Reference: ${$('Prepare Input').item.json.sessionId}.` : $('Classify & Draft Answer').item.json.output.answer }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherInputFields": false,
+        "options": {}
+      },
+      "id": "node-final-reply",
+      "name": "Format Reply",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1300, 320],
+      "notes": "The 'output' field is what the chat window shows back to the learner."
+    }
+  ],
+  "connections": {
+    "When chat message received": {
+      "main": [[{ "node": "Prepare Input", "type": "main", "index": 0 }]]
+    },
+    "Prepare Input": {
+      "main": [[{ "node": "Download FAQ from Drive", "type": "main", "index": 0 }]]
+    },
+    "Download FAQ from Drive": {
+      "main": [[{ "node": "Parse FAQ Spreadsheet", "type": "main", "index": 0 }]]
+    },
+    "Parse FAQ Spreadsheet": {
+      "main": [[{ "node": "Build FAQ Context", "type": "main", "index": 0 }]]
+    },
+    "Build FAQ Context": {
+      "main": [[{ "node": "Classify & Draft Answer", "type": "main", "index": 0 }]]
+    },
+    "Google Gemini Chat Model": {
+      "ai_languageModel": [[{ "node": "Classify & Draft Answer", "type": "ai_languageModel", "index": 0 }]]
+    },
+    "FAQ Output Parser": {
+      "ai_outputParser": [[{ "node": "Classify & Draft Answer", "type": "ai_outputParser", "index": 0 }]]
+    },
+    "Classify & Draft Answer": {
+      "main": [[{ "node": "Needs Human?", "type": "main", "index": 0 }]]
+    },
+    "Needs Human?": {
+      "main": [
+        [{ "node": "Escalate to Human", "type": "main", "index": 0 }],
+        [{ "node": "Auto-Answer", "type": "main", "index": 0 }]
+      ]
+    },
+    "Escalate to Human": {
+      "main": [[{ "node": "Notify Support Team", "type": "main", "index": 0 }]]
+    },
+    "Notify Support Team": {
+      "main": [[{ "node": "Log to Yamini_week3_Responses", "type": "main", "index": 0 }]]
+    },
+    "Auto-Answer": {
+      "main": [[{ "node": "Log to Yamini_week3_Responses", "type": "main", "index": 0 }]]
+    },
+    "Log to Yamini_week3_Responses": {
+      "main": [[{ "node": "Format Reply", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": [
+    { "name": "CodeBasics" },
+    { "name": "Week3" }
+  ]
+}
